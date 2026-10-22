@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
@@ -29,6 +30,8 @@ public class HomeKeyService extends AccessibilityService {
     private int[] settingsScancodes = new int[0];
     private int[] settingsKeycodes = new int[0];
     private boolean settingsPanel;
+    /** When the Settings button last opened Settings: the Fire OS watcher stays quiet while it is open. */
+    private long settingsOpenedAt;
     /** app_keys, the same map InputKeyService reads, for setups that run only this service. */
     private Map<Integer, String> appKeys = Collections.emptyMap();
 
@@ -58,6 +61,7 @@ public class HomeKeyService extends AccessibilityService {
                 Intent open = settingsPanel ? new Intent(this, QuickSettingsActivity.class)
                         : new Intent(Settings.ACTION_SETTINGS);
                 startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                settingsOpenedAt = SystemClock.uptimeMillis();
             }
             return true;
         }
@@ -86,6 +90,10 @@ public class HomeKeyService extends AccessibilityService {
         CharSequence pkg = event.getPackageName();
         CharSequence cls = event.getClassName();
         if (pkg == null || cls == null || !FIRE_HOME_PACKAGE.equals(pkg.toString())) return;
+        // Amazon's Settings lives in the same package as its home, so a Settings window must not pull this launcher
+        // over it. Right after the Settings button was pressed, a home window that shows up is part of opening Settings.
+        if (cls.toString().contains("Settings")) return;
+        if (SystemClock.uptimeMillis() - settingsOpenedAt < 10000) return;
         if (!cls.toString().contains("HomeActivity")) return;
         if (isHomeOwnedByThisApp()) return;
         android.util.Log.i("HomeKeyService", "amazon home shown: " + cls);
