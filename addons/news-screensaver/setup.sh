@@ -36,11 +36,14 @@ IDLE_MINUTES="${IDLE_MINUTES:-0}"
 SECONDS_PER_HEADLINE="${SECONDS_PER_HEADLINE:-}"
 tv() { "$PY" -I tv.py "$@"; }
 checked_write() {
-  local source="$1" uri="$2" out
+  local source="$1" uri="$2" seconds="${3:-}" out stage=""
   # tv.py does not pass on the TV shell's exit status; content write may also print an error and exit 0.
-  out=$(tv "write_out=\$(content write --user 0 --uri $uri < $source 2>&1); write_rc=\$?; if rm -f $source && [ \"\$write_rc\" -eq 0 ] && [ -z \"\$write_out\" ]; then echo __NEWS_WRITE_OK__; else printf '%s\n' \"\$write_out\"; fi")
+  # Stage the timing value in this same remote shell and stop before the provider write if printf fails.
+  [ -z "$seconds" ] || stage="if ! printf '%s' $seconds > $source; then rm -f $source; echo __NEWS_STAGE_FAILED__; exit; fi; "
+  out=$(tv "${stage}write_out=\$(content write --user 0 --uri $uri < $source 2>&1); write_rc=\$?; if rm -f $source && [ \"\$write_rc\" -eq 0 ] && [ -z \"\$write_out\" ]; then echo __NEWS_WRITE_OK__; else printf '%s\n' \"\$write_out\"; fi")
   case "$out" in
     __NEWS_WRITE_OK__) ;;
+    __NEWS_STAGE_FAILED__) echo "could not stage $source on the TV" >&2; return 1 ;;
     *) echo "$out" >&2; echo "could not write $uri on the TV" >&2; return 1 ;;
   esac
 }
@@ -89,8 +92,7 @@ elif [ -n "$FEEDS" ]; then
 fi
 
 if [ -n "$SECONDS_PER_HEADLINE" ]; then
-  tv "printf '%s' $SECONDS_PER_HEADLINE > $TMP-seconds.txt" >/dev/null
-  checked_write "$TMP-seconds.txt" "$URI/seconds.txt"
+  checked_write "$TMP-seconds.txt" "$URI/seconds.txt" "$SECONDS_PER_HEADLINE"
 fi
 tv "[ -f $BEFORE ] || { settings get secure screensaver_components; settings get secure screensaver_enabled; } > $BEFORE; settings put secure screensaver_components $DREAM; settings put secure screensaver_enabled 1" >/dev/null
 [ "$IDLE_MINUTES" -eq 0 ] || tv "settings put system screen_off_timeout $((IDLE_MINUTES * 60000))" >/dev/null

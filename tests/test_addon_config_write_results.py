@@ -21,12 +21,16 @@ class AddonConfigWriteResultsTest(unittest.TestCase):
         (tools / "venv/bin").mkdir(parents=True)
         (tools / "venv/bin/python").symlink_to(sys.executable)
         (tools / "tv.py").write_text('''\
-import os, pathlib, shutil, subprocess, sys
+import os, pathlib, resource, shutil, subprocess, sys
 if sys.argv[1] == "--push":
     shutil.copyfile(sys.argv[2], sys.argv[3])
 else:
+    limit_stage = os.environ.get("STAGE_FAIL") == "1" and "-seconds.txt" in sys.argv[1] and "printf '%s'" in sys.argv[1]
+    def limit_file_size():
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
     result = subprocess.run(["sh", "-c", sys.argv[1]], capture_output=True, text=True,
-                            env={**os.environ, "PATH": os.environ["FAKE_ROOT"] + "/bin:" + os.environ["PATH"]})
+                            env={**os.environ, "PATH": os.environ["FAKE_ROOT"] + "/bin:" + os.environ["PATH"]},
+                            preexec_fn=limit_file_size if limit_stage else None)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     # The real tv.py also does not pass through the remote shell's exit status.
@@ -42,6 +46,7 @@ print("md5 MATCH")
         for name, body in {
             "pm": "#!/bin/sh\ncase \"$1\" in path) echo package:/fake/app.apk ;; *) echo Success ;; esac\n",
             "content": '''#!/bin/sh
+case "$*" in *seconds.txt*) echo write >> "$FAKE_ROOT/seconds-writes" ;; esac
 case "$CONTENT_MODE" in
   error) echo 'Could not find provider' >&2; exit 0 ;;
   picture_error) case "$*" in *pictures*) echo 'Could not find provider' >&2; exit 0 ;; esac ;;
@@ -72,11 +77,12 @@ exit 0
         (folder / "gradlew").chmod(0o755)
         return path
 
-    def run_script(self, path, mode, *args, cp_fail=False):
+    def run_script(self, path, mode, *args, cp_fail=False, stage_fail=False, **settings):
         return subprocess.run(
             ["bash", str(path), *map(str, args)], cwd=self.root,
             env={**os.environ, "TV_HOST": "fake", "FAKE_ROOT": str(self.root),
-                 "CONTENT_MODE": mode, "CP_FAIL": "1" if cp_fail else "0"},
+                 "CONTENT_MODE": mode, "CP_FAIL": "1" if cp_fail else "0",
+                 "STAGE_FAIL": "1" if stage_fail else "0", **settings},
             capture_output=True, text=True,
         )
 
@@ -144,11 +150,38 @@ exit 0
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Screensaver: News", result.stdout)
 
+    def test_news_rejects_failed_seconds_stage_before_provider_write(self):
+        stage = self.root / "news-stage"
+        path = self.script("news-screensaver", "setup.sh", {
+            "TMP=/data/local/tmp/cyt-news": f"TMP={stage}",
+            "BEFORE=/data/local/tmp/cyt-news-before": f"BEFORE={self.root}/news-before",
+        })
+        result = self.run_script(path, "success", stage_fail=True, SECONDS_PER_HEADLINE="120")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue("could not stage" in result.stderr or "could not write" in result.stderr)
+        self.assertNotIn("Screensaver: News", result.stdout)
+        self.assertFalse((self.root / "seconds-writes").exists())
+
     def test_photos_rejects_zero_exit_seconds_error(self):
         result, stage = self.photos("error")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Screensaver: Photos", result.stdout)
         self.assertFalse(Path(str(stage) + "-seconds.txt").exists())
+
+    def test_photos_rejects_failed_seconds_stage_before_provider_write(self):
+        stage = self.root / "photo-stage"
+        path = self.script("photo-screensaver", "sync.sh", {
+            "TMP=/data/local/tmp/cyt-screensaver": f"TMP={stage}",
+            "BEFORE=/data/local/tmp/cyt-screensaver-before": f"BEFORE={self.root}/photo-before",
+            "DIR=/sdcard/Android/data/$PKG/files/pictures": f"DIR={self.root}/tv-pictures",
+        })
+        pictures = self.root / "pictures"
+        pictures.mkdir()
+        result = self.run_script(path, "success", pictures, stage_fail=True, SECONDS_PER_PICTURE="120")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue("could not stage" in result.stderr or "could not write" in result.stderr)
+        self.assertNotIn("Screensaver: Photos", result.stdout)
+        self.assertFalse((self.root / "seconds-writes").exists())
 
     def test_photos_fallback_copies_when_provider_prints_error(self):
         result, _ = self.photos("picture_error", with_image=True)
